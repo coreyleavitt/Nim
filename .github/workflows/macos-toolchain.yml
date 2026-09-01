@@ -9,6 +9,8 @@ name: macos-toolchain
 
 on:
   workflow_dispatch:
+  push:
+    branches: [toolchain]
 
 permissions:
   contents: read
