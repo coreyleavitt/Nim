@@ -1,0 +1,79 @@
+name: macos-toolchain
+
+# Builds the patched Nim dev toolchain (release tarball + backport series,
+# same recipe as the ghcr.io/coreyleavitt/nim container images) on a macOS
+# runner and publishes the self-contained prefix as an OCI artifact:
+#   ghcr.io/coreyleavitt/nim:<ver>-macos-<arch>
+# Consume in CI with `oras pull`, or download and extract for local use;
+# the prefix resolves its stdlib relative to bin/nim.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  NIM_VER: "2.2.10"
+  NIM_SHA: "7957b7ed004206bcf10bcc4f3b4744153878e62f2431552a9a8e9d3f40e8d5d5"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build patched Nim from source
+        run: |
+          chmod +x build-nim.sh
+          TARBALL_CACHE="$RUNNER_TEMP" \
+          NIM_PATCH_DIR="$PWD/patches/$NIM_VER" \
+          NIM_KOCH_TOOLS=1 \
+            ./build-nim.sh "$NIM_VER" "$NIM_SHA" "$PWD/prefix/nim-$NIM_VER-patched"
+
+      - name: Validate against the series' repro suite
+        run: |
+          export PATH="$PWD/prefix/nim-$NIM_VER-patched/bin:$PATH"
+          nim --version
+          set -x
+          # allocator thread-lifetime fixes (patches 0004/0005)
+          nim c -r --hints:off --mm:orc --threads:on -d:release -o:"$RUNNER_TEMP/t1" tests/repro_allocshared.nim | grep -q survived
+          nim c -r --hints:off --mm:orc --threads:on -d:release -o:"$RUNNER_TEMP/t2" tests/repro_ref_handoff.nim | grep -q survived
+          # forward-type flag propagation fix (patch 0006)
+          nim c -r --hints:off --mm:orc -d:useMalloc -o:"$RUNNER_TEMP/t3" tests/repro_26025.nim | grep -q ok
+
+      - name: Package prefix
+        run: |
+          tar -C prefix -cJf "nim-$NIM_VER-patched-macos-${{ matrix.arch }}.tar.xz" "nim-$NIM_VER-patched"
+          shasum -a 256 "nim-$NIM_VER-patched-macos-${{ matrix.arch }}.tar.xz"
+
+      - uses: oras-project/setup-oras@v1
+
+      - name: Push OCI artifact to ghcr
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          patches=$(ls patches/$NIM_VER/*.patch | sed 's|.*/||' | paste -sd, -)
+          push() {
+            oras push "$1" \
+              --artifact-type application/x-nim-toolchain \
+              --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+              --annotation "dev.leavitt.nim.version=$NIM_VER" \
+              --annotation "dev.leavitt.nim.patches=$patches" \
+              "nim-$NIM_VER-patched-macos-${{ matrix.arch }}.tar.xz:application/x-xz"
+          }
+          if ! push "ghcr.io/coreyleavitt/nim:$NIM_VER-macos-${{ matrix.arch }}"; then
+            echo "::warning::push to existing package denied; publishing to nim-macos instead (grant Actions access on the nim package to consolidate)"
+            push "ghcr.io/coreyleavitt/nim-macos:$NIM_VER-${{ matrix.arch }}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nim-${{ env.NIM_VER }}-patched-macos-${{ matrix.arch }}
+          path: nim-${{ env.NIM_VER }}-patched-macos-${{ matrix.arch }}.tar.xz
+          retention-days: 14

@@ -1,0 +1,45 @@
+Backport of nim-lang/Nim#26093 (fixes #26092) onto the 2.2.10 source tree.
+
+Exiting a nested {.cast(gcsafe).} or {.cast(noSideEffect).} block cleared the
+enforcement flag unconditionally instead of restoring the enclosing block's
+state, so every statement after the inner block was checked as if no cast were
+active. Bites in practice when a library template expands to a cast(gcsafe)
+block around a global access and the caller wraps the call in its own cast
+block (found via chronos). Save both flags in PragmaBlockContext at creation
+and restore them on exit, matching the save/restore pattern every other piece
+of block state there already follows.
+
+Longstanding since v1.4.0. Open upstream PR against devel; drop this patch
+once a 2.2.x containing #26093 ships.
+
+--- a/compiler/sempass2.nim
++++ b/compiler/sempass2.nim
+@@ -1201,6 +1201,7 @@
+   PragmaBlockContext = object
+     oldLocked: int
+     enforcedGcSafety, enforceNoSideEffects: bool
++    oldInEnforcedGcSafe, oldInEnforcedNoSideEffects: bool
+     oldExc, oldTags, oldForbids: int
+     exc, tags, forbids: PNode
+ 
+@@ -1209,6 +1210,8 @@
+   if tracked.forbids != nil: oldForbidsLen = tracked.forbids.len
+   result = PragmaBlockContext(oldLocked: tracked.locked.len,
+     enforcedGcSafety: false, enforceNoSideEffects: false,
++    oldInEnforcedGcSafe: tracked.inEnforcedGcSafe,
++    oldInEnforcedNoSideEffects: tracked.inEnforcedNoSideEffects,
+     oldExc: tracked.exc.len, oldTags: tracked.tags.len,
+     oldForbids: oldForbidsLen)
+ 
+@@ -1217,8 +1220,9 @@
+   if bc.enforceNoSideEffects: tracked.inEnforcedNoSideEffects = true
+ 
+ proc unapplyBlockContext(tracked: PEffects; bc: PragmaBlockContext) =
+-  if bc.enforcedGcSafety: tracked.inEnforcedGcSafe = false
+-  if bc.enforceNoSideEffects: tracked.inEnforcedNoSideEffects = false
++  if bc.enforcedGcSafety: tracked.inEnforcedGcSafe = bc.oldInEnforcedGcSafe
++  if bc.enforceNoSideEffects:
++    tracked.inEnforcedNoSideEffects = bc.oldInEnforcedNoSideEffects
+   setLen(tracked.locked, bc.oldLocked)
+   if bc.exc != nil:
+     # beware that 'raises: []' is very different from not saying

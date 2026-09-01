@@ -1,0 +1,30 @@
+Backport of nim-lang/Nim#25855 (fixes #25851) onto the 2.2.10 source tree.
+
+The regression (#25851): under --exceptions:goto + --panics:on the compiler drops
+the nimErr_ check after an indirect/closure call whose result flows straight into
+another call (`result.add elem(src)`), swallowing a raise and eventually
+overflowing the nimInErrorMode bool into a fatal OverflowDefect.
+
+canRaise() in compiler/ast.nim is byte-identical between v2.2.10 and the pre-fix
+devel tree, so the upstream one-expression fix applies unchanged: treat a nil
+exceptionEffects slot as "effects unknown -> can raise". Applied before `koch
+boot`, which recompiles the compiler from source. Upstream fix not yet released in
+any 2.2.x tarball; drop this patch once a 2.2.x that contains #25855 ships.
+
+--- a/compiler/ast.nim
++++ b/compiler/ast.nim
+@@ -2122,9 +2122,12 @@
+     if fn.typ.n[0].kind == nkSym:
+       result = false
+     else:
++      # Backport of nim-lang/Nim#25855 (fixes #25851): a nil exceptionEffects
++      # slot means "effects unknown", so codegen must assume the call can raise
++      # and keep the nimErr_ check after indirect/closure calls under --panics:on.
+       result = ((fn.typ.n[0].len < effectListLen) or
+-        (fn.typ.n[0][exceptionEffects] != nil and
+-        fn.typ.n[0][exceptionEffects].safeLen > 0))
++        fn.typ.n[0][exceptionEffects] == nil or
++        fn.typ.n[0][exceptionEffects].safeLen > 0)
+   else:
+     result = false
+ 

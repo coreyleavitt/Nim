@@ -1,0 +1,22 @@
+Backport of nim-lang/Nim#25858 (fixes #25857) onto the 2.2.10 source tree.
+
+`typeof(result)` inside result's own initializer was counted as a use-before-init
+of `result`. The definite-assignment pass `track` (compiler/sempass2.nim) recurses
+into every child including `nkTypeOfExpr`, but `typeof(e)` never evaluates `e`, so
+calling `useVar` on the inner `result` is wrong. PR #25151 escalated the resulting
+spurious ProveInit warning to a hard error, breaking the `ok(typeof(result), v)` /
+`?` constructor idiom on {.requiresInit.} result types. Skip nkTypeOfExpr in track.
+
+The track prologue is identical across 2.2.x and devel, so the upstream one-hunk
+fix applies unchanged. Merged upstream; drop this patch once a 2.2.x containing
+#25858 ships.
+
+--- a/compiler/sempass2.nim
++++ b/compiler/sempass2.nim
+@@ -1240,4 +1240,6 @@ proc track(tracked: PEffects, n: PNode) =
+ proc track(tracked: PEffects, n: PNode) =
+   case n.kind
++  of nkTypeOfExpr:
++    discard "typeof() never evaluates its operand; not a definite-assignment use"
+   of nkSym:
+     useVar(tracked, n)
