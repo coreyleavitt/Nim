@@ -1,0 +1,50 @@
+# ghcr.io/coreyleavitt/nim:<ver>-alpine — Nim patched dev base, musl edition.
+#
+# Same patched Nim 2.2.10 + backport series as Dockerfile.dev (that file is the
+# reference; series list and rationale live there), built from source on Alpine
+# against musl. For static-friendly / musl-target builds. Default C compiler is
+# clang (`cc = clang` in the prefix nim.cfg); gcc stays installed because
+# Alpine's clang links via libgcc/crt from the gcc package, and it keeps
+# `--cc:gcc` available as a fallback.
+#
+# NOTE: this image is linux/amd64 like the glibc base, so it CANNOT be an entry
+# in the ghcr.io/coreyleavitt/nim:2.2.10 manifest list (same platform tuple).
+# It ships only under the `-alpine` suffix tags, like `-windows` does.
+#
+# Build context is this `toolchain/` dir:
+#   podman build -f Dockerfile.alpine -t ghcr.io/coreyleavitt/nim:2.2.10-alpine .
+#   podman push ghcr.io/coreyleavitt/nim:2.2.10-alpine
+
+# ---- build stage: compile patched nim + tools -------------------------------
+FROM docker.io/alpine:3.22 AS build
+RUN apk add --no-cache bash gcc g++ clang musl-dev make git curl xz tar gzip patch \
+      openssl-dev sqlite-dev
+COPY build-nim.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/build-nim.sh
+COPY patches /usr/local/share/nim-patches
+RUN --mount=type=cache,target=/var/cache/nim \
+    TARBALL_CACHE=/var/cache/nim \
+    NIM_PATCH_DIR=/usr/local/share/nim-patches/2.2.10 \
+    NIM_KOCH_TOOLS=1 \
+    build-nim.sh 2.2.10 7957b7ed004206bcf10bcc4f3b4744153878e62f2431552a9a8e9d3f40e8d5d5 \
+      /opt/nim/2.2.10-patched && \
+    printf '\ncc = clang\n' >> /opt/nim/2.2.10-patched/config/nim.cfg
+
+# ---- runtime: lean dev base -------------------------------------------------
+FROM docker.io/alpine:3.22
+RUN apk add --no-cache bash gcc g++ clang musl-dev git curl openssl-dev sqlite-dev
+COPY --from=build /opt/nim/2.2.10-patched /opt/nim/2.2.10-patched
+ENV PATH=/opt/nim/2.2.10-patched/bin:/root/.nimble/bin:$PATH
+# Login shells (bash -l / su -) re-source /etc/profile; keep nim on PATH there too.
+RUN printf 'export PATH=/opt/nim/2.2.10-patched/bin:/root/.nimble/bin:$PATH\n' \
+      > /etc/profile.d/nim.sh
+
+LABEL org.opencontainers.image.title="Nim (patched dev base, Alpine/musl)" \
+      org.opencontainers.image.description="Nim 2.2.10 + backport series (#25855, #25858, #26093, #26017, #26110, #26076), nimble + tools, clang (default cc) + gcc on Alpine musl" \
+      org.opencontainers.image.source="https://github.com/coreyleavitt/nim" \
+      org.opencontainers.image.base.name="docker.io/alpine:3.22" \
+      dev.leavitt.nim.version="2.2.10" \
+      dev.leavitt.nim.patches="nim-lang/Nim#25855,nim-lang/Nim#25858,nim-lang/Nim#26093,nim-lang/Nim#26017,nim-lang/Nim#26110,nim-lang/Nim#26076"
+
+WORKDIR /work
+CMD ["bash"]

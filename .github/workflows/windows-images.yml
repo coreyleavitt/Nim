@@ -1,0 +1,73 @@
+name: windows-images
+
+# Builds the Windows MSVC + mingw dev-base images on a windows-2025 runner
+# (process isolation against servercore:ltsc2025), validates, pushes the
+# suffix tags, and re-stitches the shared manifest lists with the fresh
+# windows digest. Experimental: the VS Build Tools layer is a cold multi-GB
+# download per run, expect 1.5-2h. workflow_dispatch only.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  NIM_VER: "2.2.10"
+  IMAGE: ghcr.io/coreyleavitt/nim
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Seed release tarball cache
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path cache | Out-Null
+          Invoke-WebRequest -Uri "https://nim-lang.org/download/nim-$env:NIM_VER.tar.xz" -OutFile "cache/nim-$env:NIM_VER.tar.xz"
+
+      - name: Build MSVC image
+        run: docker build -f Dockerfile.windows-msvc -t "$env:IMAGE`:$env:NIM_VER-windows" .
+
+      - name: Build mingw image
+        run: docker build -f Dockerfile.windows-mingw -t "$env:IMAGE`:$env:NIM_VER-mingw" .
+
+      - name: Validate against the series' repro suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($suffix in @('windows','mingw')) {
+            docker run --rm -v "$PWD\tests:C:\t:ro" "$env:IMAGE`:$env:NIM_VER-$suffix" powershell -Command "
+              nim c -r --hints:off --mm:orc --threads:on -d:release --nimcache:C:\temp\nc -o:C:\temp\t1.exe C:\t\repro_allocshared.nim
+              if (`$LASTEXITCODE -ne 0) { exit 1 }
+              nim c -r --hints:off --mm:orc --threads:on -d:release --nimcache:C:\temp\nc -o:C:\temp\t2.exe C:\t\repro_ref_handoff.nim
+              if (`$LASTEXITCODE -ne 0) { exit 1 }
+              nim c -r --hints:off --mm:orc -d:useMalloc --nimcache:C:\temp\nc -o:C:\temp\t3.exe C:\t\repro_26025.nim
+              if (`$LASTEXITCODE -ne 0) { exit 1 }"
+            if ($LASTEXITCODE -ne 0) { throw "validation failed for $suffix" }
+          }
+
+      - name: Push
+        shell: pwsh
+        run: |
+          "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$env:IMAGE`:$env:NIM_VER-windows"
+          docker push "$env:IMAGE`:$env:NIM_VER-mingw"
+
+      - name: Re-stitch multi-platform manifest lists
+        shell: bash
+        run: |
+          set -euo pipefail
+          linux_digest=$(docker manifest inspect "$IMAGE:$NIM_VER" -v | jq -r 'if type=="array" then (.[] | select(.Descriptor.platform.os=="linux") | .Descriptor.digest) else .Descriptor.digest end' | head -1)
+          win_digest=$(docker manifest inspect "$IMAGE:$NIM_VER-windows" -v | jq -r 'if type=="array" then .[0].Descriptor.digest else .Descriptor.digest end')
+          win_osver=$(docker inspect --format '{{.OsVersion}}' "$IMAGE:$NIM_VER-windows")
+          echo "linux=$linux_digest windows=$win_digest os.version=$win_osver"
+          for tag in "$NIM_VER" latest; do
+            docker manifest rm "$IMAGE:$tag" 2>/dev/null || true
+            docker manifest create "$IMAGE:$tag" "$IMAGE@$linux_digest" "$IMAGE@$win_digest"
+            docker manifest annotate --os windows --arch amd64 --os-version "$win_osver" "$IMAGE:$tag" "$IMAGE@$win_digest"
+            docker manifest push "$IMAGE:$tag"
+          done

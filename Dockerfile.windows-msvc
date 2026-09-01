@@ -1,0 +1,131 @@
+# escape=`
+# Windows toolchain env — the Windows port of the WSL bug-busting dev base
+# (bugbusting/nim/toolchain/Dockerfile.dev): MSVC Build Tools + Nim 2.2.10 with
+# our backport series applied, built from source by build-nim.ps1, plus the
+# pristine 2.2.10 binary alongside for patched-vs-stock comparison runs.
+# Series (patches/2.2.10/, synced from the WSL toolchain — that copy is the
+# source of truth):
+#   #25855 (fixes #25851)  --panics:on dropping nimErr_ check after closure calls
+#   #25858 (fixes #25857)  typeof(result) breaking {.requiresInit.} result types
+#   #26093 (fixes #26092)  nested cast(gcsafe) block exit cancelling the outer cast
+#   #26017 (fixes #26016)  allocator losing deferred big-chunk list nodes
+#   #26110 (fixes #26014 et al)  cross-thread dealloc after thread exit UAF; pooled MemRegions
+#   #26076 (fixes #26025)  stale hook flags from forward type declarations
+#
+# Multistage: the `build` stage carries the full VS Build Tools install
+# (~5.7 GB) and all build debris; the final stage gets only the finished Nim
+# prefixes plus the minimal x64 MSVC + SDK subset (~1.2 GB, see
+# trim-toolchain.ps1). vccexe runs cl from PATH with the ambient env when
+# vcvarsall.bat is absent, so the final stage just bakes INCLUDE/LIB/PATH.
+#
+# Requires Docker Desktop in "Windows containers" mode.
+# Build (from this folder; -m 16g — the Hyper-V isolation default of 1 GB
+# OOM-kills the MSVC compiles in koch boot with no error output):
+#   docker build -m 16g -t ghcr.io/coreyleavitt/nim:2.2.10-windows .
+# Push + re-stitch the shared multi-platform nim:2.2.10 / nim:latest tags:
+#   see README (docker manifest create/annotate — keeps os.version).
+# Run (e.g. oyamel tests against the patched compiler):
+#   docker run --rm -v C:\Users\corey\projects\oyamel:C:\app ghcr.io/coreyleavitt/nim:2.2.10-windows nimble test
+# Stock compiler for comparison: C:\nim\2.2.10-stock\bin\nim.exe
+
+FROM mcr.microsoft.com/windows/servercore:ltsc2025 AS build
+
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+
+# Install Visual Studio Build Tools (C/C++ workload + Windows SDK)
+RUN Invoke-WebRequest -Uri https://aka.ms/vs/17/release/vs_buildtools.exe -OutFile vs_buildtools.exe; `
+    Start-Process -Wait -FilePath .\vs_buildtools.exe -ArgumentList `
+        '--quiet', '--wait', '--norestart', '--nocache', `
+        '--add', 'Microsoft.VisualStudio.Workload.VCTools', `
+        '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', `
+        '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.26100', `
+        '--includeRecommended'; `
+    Remove-Item -Force vs_buildtools.exe
+
+# Git first: nimble fetches packages with it, and build-nim.ps1 applies the
+# backport series with `git apply` (no GNU patch on Windows).
+RUN Invoke-WebRequest -Uri https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.2/MinGit-2.47.1.2-64-bit.zip -OutFile git.zip; `
+    Expand-Archive git.zip -DestinationPath C:\git; `
+    Remove-Item -Force git.zip
+
+# Stock Nim 2.2.10 (pinned): the pristine comparison compiler AND the stage-0
+# bootstrap for the patched source build (csources build.bat needs mingw,
+# which this MSVC-only image deliberately lacks).
+RUN Invoke-WebRequest -Uri https://nim-lang.org/download/nim-2.2.10_x64.zip -OutFile nim.zip; `
+    $h = (Get-FileHash -Algorithm SHA256 nim.zip).Hash.ToLowerInvariant(); `
+    if ($h -ne 'fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f') { throw ('nim.zip sha256 mismatch: ' + $h) }; `
+    Expand-Archive nim.zip -DestinationPath C:\; `
+    New-Item -ItemType Directory -Path C:\nim -Force | Out-Null; `
+    Move-Item C:\nim-2.2.10 C:\nim\2.2.10-stock; `
+    Remove-Item -Force nim.zip; `
+    Add-Content -Path C:\nim\2.2.10-stock\config\nim.cfg -Value 'cc = vcc'
+
+# Install nimble dependencies cache dir
+RUN New-Item -ItemType Directory -Path C:\Users\ContainerAdministrator\.nimble\bin -Force | Out-Null
+
+# Patched compiler first on PATH; the stock one stays off PATH, reachable by
+# full path only, so there is never any doubt which nim a run used.
+RUN $p = 'C:\nim\2.2.10-patched\bin;C:\git\cmd;C:\Users\ContainerAdministrator\.nimble\bin;' + [Environment]::GetEnvironmentVariable('PATH', 'Machine'); `
+    [Environment]::SetEnvironmentVariable('PATH', $p, 'Machine')
+
+# Trust the host-mounted repo (nimble shells out to git for VCS metadata,
+# which refuses on cross-user-owned dirs by default).
+RUN git config --global --add safe.directory C:/app
+
+# Bake the MSVC environment into machine env vars via vcvarsall (must precede
+# the source build below — koch needs cl on PATH).
+COPY setup_msvc_env.ps1 C:\setup_msvc_env.ps1
+RUN powershell -File C:\setup_msvc_env.ps1; `
+    Remove-Item -Force C:\setup_msvc_env.ps1
+
+# Build patched 2.2.10 — last, because the patch series changes most often and
+# everything above stays cached.
+COPY build-nim.ps1 C:\build-nim.ps1
+COPY patches C:\nim-patches
+# Pre-seeded release tarball (sha-verified by build-nim.ps1): container NAT
+# lacks an IPv6 path and nim-lang.org resolves to IPv6 in-container, so the
+# in-build download times out. The cache hit skips the download entirely.
+COPY cache C:\tarball-cache
+ENV TARBALL_CACHE=C:\tarball-cache
+RUN powershell -File C:\build-nim.ps1 -Version 2.2.10 `
+        -Sha256 7957b7ed004206bcf10bcc4f3b4744153878e62f2431552a9a8e9d3f40e8d5d5 `
+        -Prefix C:\nim\2.2.10-patched `
+        -Bootstrap C:\nim\2.2.10-stock `
+        -PatchDir C:\nim-patches\2.2.10 `
+        -KochTools
+
+# Stage the minimal toolchain subset for the final image
+COPY trim-toolchain.ps1 C:\trim-toolchain.ps1
+RUN powershell -File C:\trim-toolchain.ps1
+
+
+FROM mcr.microsoft.com/windows/servercore:ltsc2025
+
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+
+COPY --from=build C:\staging\msvc C:\msvc
+COPY --from=build C:\nim C:\nim
+COPY --from=build C:\git C:\git
+
+RUN New-Item -ItemType Directory -Path C:\Users\ContainerAdministrator\.nimble\bin -Force | Out-Null
+
+# MSVC env without vcvarsall: cl/link/rc on PATH, headers and libs by env var.
+# Patched compiler first on PATH; stock reachable by full path only.
+RUN [Environment]::SetEnvironmentVariable('INCLUDE', 'C:\msvc\vc\include;C:\msvc\sdk\include\ucrt;C:\msvc\sdk\include\um;C:\msvc\sdk\include\shared', 'Machine'); `
+    [Environment]::SetEnvironmentVariable('LIB', 'C:\msvc\vc\lib;C:\msvc\sdk\lib\ucrt;C:\msvc\sdk\lib\um', 'Machine'); `
+    $p = 'C:\nim\2.2.10-patched\bin;C:\git\cmd;C:\Users\ContainerAdministrator\.nimble\bin;C:\msvc\vc\bin;C:\msvc\sdk\bin;' + [Environment]::GetEnvironmentVariable('PATH', 'Machine'); `
+    [Environment]::SetEnvironmentVariable('PATH', $p, 'Machine')
+
+# Trust the host-mounted repo (nimble shells out to git for VCS metadata,
+# which refuses on cross-user-owned dirs by default).
+RUN git config --global --add safe.directory C:/app
+
+LABEL org.opencontainers.image.title="Nim (patched dev base, Windows)" `
+      org.opencontainers.image.description="Nim 2.2.10 + backport series (#25855, #25858, #26093, #26017, #26110, #26076), nimble + tools, MSVC on Windows Server Core" `
+      org.opencontainers.image.base.name="mcr.microsoft.com/windows/servercore:ltsc2025" `
+      dev.leavitt.nim.version="2.2.10" `
+      dev.leavitt.nim.patches="nim-lang/Nim#25855,nim-lang/Nim#25858,nim-lang/Nim#26093,nim-lang/Nim#26017,nim-lang/Nim#26110,nim-lang/Nim#26076"
+
+WORKDIR C:\app
+
+CMD ["powershell"]

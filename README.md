@@ -18,6 +18,14 @@ Windows port's `patches/`. Re-sync after changing the series.
 - `.github/workflows/macos-toolchain.yml` — workflow_dispatch build that
   publishes `ghcr.io/coreyleavitt/nim:<ver>-macos-<arch>` as an OCI artifact
   (a tar.xz of the prefix, pushed with oras).
+- `.github/workflows/linux-images.yml` — dispatch-only for now: builds the
+  glibc + alpine dev-base images from the committed series, validates,
+  pushes, and re-stitches the shared manifest lists.
+- `.github/workflows/windows-images.yml` — dispatch-only, experimental:
+  MSVC + mingw images on a windows-2025 runner (process isolation), with
+  the same validate/push/re-stitch flow. The release tarball is seeded into
+  the build context (`cache/`) because the Dockerfiles no longer download
+  it in-build.
 
 Consume:
 

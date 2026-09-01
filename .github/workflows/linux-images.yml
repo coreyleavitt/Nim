@@ -1,0 +1,71 @@
+name: linux-images
+
+# Builds the glibc + alpine dev-base container images from the committed
+# patch series, validates them against the repro suite, pushes all tags, and
+# re-stitches the multi-platform manifest lists (linux + the current windows
+# image) so the shared tags never stay flattened.
+#
+# workflow_dispatch only for now; switch to a push trigger once CI is the
+# publishing path of record.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  NIM_VER: "2.2.10"
+  IMAGE: ghcr.io/coreyleavitt/nim
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build glibc image
+        run: docker build -f Dockerfile.dev -t "$IMAGE:$NIM_VER" -t "$IMAGE:latest" .
+
+      - name: Build alpine image
+        run: docker build -f Dockerfile.alpine -t "$IMAGE:$NIM_VER-alpine" .
+
+      - name: Validate against the series' repro suite
+        run: |
+          set -x
+          for img in "$IMAGE:$NIM_VER" "$IMAGE:$NIM_VER-alpine"; do
+            docker run --rm -v "$PWD/tests:/t:ro" "$img" bash -c '
+              set -e
+              nim c -r --hints:off --mm:orc --threads:on -d:release -o:/tmp/t1 /t/repro_allocshared.nim | grep -q survived
+              nim c -r --hints:off --mm:orc --threads:on -d:release -o:/tmp/t2 /t/repro_ref_handoff.nim | grep -q survived
+              nim c -r --hints:off --mm:orc -d:useMalloc -o:/tmp/t3 /t/repro_26025.nim | grep -q ok'
+          done
+
+      - name: Push
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:$NIM_VER"
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:$NIM_VER-alpine"
+
+      - name: Re-stitch multi-platform manifest lists
+        run: |
+          # A plain push flattens the shared tags to the linux manifest only.
+          # Rebuild the lists from the fresh linux digest plus the current
+          # windows image. docker manifest, not buildx imagetools: imagetools
+          # drops the windows entry's os.version, which hosts match on.
+          set -euo pipefail
+          linux_digest=$(docker manifest inspect "$IMAGE:$NIM_VER" -v | jq -r 'if type=="array" then .[0].Descriptor.digest else .Descriptor.digest end')
+          win_digest=$(docker manifest inspect "$IMAGE:$NIM_VER-windows" -v | jq -r 'if type=="array" then .[0].Descriptor.digest else .Descriptor.digest end')
+          win_osver=$(docker manifest inspect "$IMAGE:$NIM_VER-windows" | jq -r '.. | objects | select(has("os.version")) | ."os.version"' | head -1)
+          if [ -z "$win_osver" ] || [ "$win_osver" = "null" ]; then
+            win_osver=$(docker manifest inspect "$IMAGE:$NIM_VER-windows" -v | jq -r '[.. | objects | select(has("OSVersion")) | .OSVersion] | map(select(. != null and . != "")) | .[0]')
+          fi
+          echo "linux=$linux_digest windows=$win_digest os.version=$win_osver"
+          for tag in "$NIM_VER" latest; do
+            docker manifest rm "$IMAGE:$tag" 2>/dev/null || true
+            docker manifest create "$IMAGE:$tag" "$IMAGE@$linux_digest" "$IMAGE@$win_digest"
+            docker manifest annotate --os windows --arch amd64 --os-version "$win_osver" "$IMAGE:$tag" "$IMAGE@$win_digest"
+            docker manifest push "$IMAGE:$tag"
+          done

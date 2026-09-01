@@ -1,0 +1,61 @@
+# ghcr.io/coreyleavitt/nim — Nim patched dev base.
+#
+# Nim 2.2.10 with our backport series applied, plus nimble + tools, gcc & clang, on
+# openSUSE Tumbleweed. This is the day-to-day toolchain for building proptest / nopal
+# until these fixes ship in an upstream 2.2.x — kept deliberately separate from the
+# pristine `nim-matrix` regression harness, which must stay unmodified. Series:
+#   #25855 (fixes #25851)  --panics:on dropping nimErr_ check after closure calls (merged)
+#   #25858 (fixes #25857)  typeof(result) breaking {.requiresInit.} result types (merged)
+#   #26093 (fixes #26092)  nested cast(gcsafe) block exit cancelling the outer cast (open)
+#   #26017 (fixes #26016)  allocator losing deferred big-chunk list nodes (merged)
+#   #26110 (fixes #26014/#24988/#23361/#20542)  cross-thread dealloc after the
+#          allocating thread exits = use-after-free; pooled MemRegions (merged, devel-only)
+#   #26076 (fixes #26025)  stale hook flags from forward type declarations (merged,
+#          version-2-2; does not cover the nested-Table shape, see bug-fwdref-table-copy)
+#
+# Patches are a real, ordered series under patches/<ver>/ (see build-nim.sh) so
+# additional, less-trivial backports can be sequenced deterministically.
+#
+# Build context is this `toolchain/` dir:
+#   podman build -f Dockerfile.dev \
+#     -t ghcr.io/coreyleavitt/nim:2.2.10 -t ghcr.io/coreyleavitt/nim:latest .
+#   podman push ghcr.io/coreyleavitt/nim:2.2.10
+#   podman push ghcr.io/coreyleavitt/nim:latest
+
+# ---- build stage: compile patched nim + tools -------------------------------
+FROM opensuse/tumbleweed AS build
+RUN zypper -n install --no-recommends \
+      gcc gcc-c++ clang make git curl xz tar gzip findutils which patch \
+      sqlite3-devel openssl-devel && \
+    zypper clean -a
+COPY build-nim.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/build-nim.sh
+COPY patches /usr/local/share/nim-patches
+RUN --mount=type=cache,target=/var/cache/nim \
+    TARBALL_CACHE=/var/cache/nim \
+    NIM_PATCH_DIR=/usr/local/share/nim-patches/2.2.10 \
+    NIM_KOCH_TOOLS=1 \
+    build-nim.sh 2.2.10 7957b7ed004206bcf10bcc4f3b4744153878e62f2431552a9a8e9d3f40e8d5d5 \
+      /opt/nim/2.2.10-patched
+
+# ---- runtime: lean dev base -------------------------------------------------
+FROM opensuse/tumbleweed
+RUN zypper -n install --no-recommends \
+      gcc gcc-c++ clang git curl which sqlite3-devel openssl-devel && \
+    zypper clean -a
+COPY --from=build /opt/nim/2.2.10-patched /opt/nim/2.2.10-patched
+ENV PATH=/opt/nim/2.2.10-patched/bin:/root/.nimble/bin:$PATH
+# Also export for login shells (bash -l / su -), which re-source /etc/profile and
+# would otherwise drop the ENV PATH.
+RUN printf 'export PATH=/opt/nim/2.2.10-patched/bin:/root/.nimble/bin:$PATH\n' \
+      > /etc/profile.d/nim.sh
+
+LABEL org.opencontainers.image.title="Nim (patched dev base)" \
+      org.opencontainers.image.description="Nim 2.2.10 + backport series (#25855, #25858, #26093, #26017, #26110, #26076), nimble + tools, gcc/clang on openSUSE Tumbleweed" \
+      org.opencontainers.image.source="https://github.com/coreyleavitt/nim" \
+      org.opencontainers.image.base.name="docker.io/opensuse/tumbleweed" \
+      dev.leavitt.nim.version="2.2.10" \
+      dev.leavitt.nim.patches="nim-lang/Nim#25855,nim-lang/Nim#25858,nim-lang/Nim#26093,nim-lang/Nim#26017,nim-lang/Nim#26110,nim-lang/Nim#26076"
+
+WORKDIR /work
+CMD ["bash"]
