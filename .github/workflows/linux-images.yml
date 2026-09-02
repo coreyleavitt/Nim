@@ -49,6 +49,33 @@ jobs:
           docker push "$IMAGE:latest"
           docker push "$IMAGE:$NIM_VER-alpine"
 
+      - uses: oras-project/setup-oras@v1
+
+      - name: Publish prefix tarball artifacts
+        run: |
+          # Same bits as the images: extract the validated prefix, package,
+          # push as an OCI artifact. Fast path for CI consumers that do not
+          # want a container pull.
+          set -euo pipefail
+          patches=$(ls patches/$NIM_VER/*.patch | sed 's|.*/||' | paste -sd, -)
+          publish() { # image suffix, artifact suffix
+            local img="$1" suffix="$2"
+            local cid; cid=$(docker create "$img")
+            docker cp "$cid:/opt/nim/$NIM_VER-patched" "nim-$NIM_VER-patched"
+            docker rm "$cid" >/dev/null
+            tar -cJf "nim-$NIM_VER-patched-$suffix.tar.xz" "nim-$NIM_VER-patched"
+            rm -rf "nim-$NIM_VER-patched"
+            oras push "$IMAGE:$NIM_VER-$suffix" \
+              --artifact-type application/x-nim-toolchain \
+              --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+              --annotation "dev.leavitt.nim.version=$NIM_VER" \
+              --annotation "dev.leavitt.nim.patches=$patches" \
+              "nim-$NIM_VER-patched-$suffix.tar.xz:application/x-xz"
+            rm -f "nim-$NIM_VER-patched-$suffix.tar.xz"
+          }
+          publish "$IMAGE:$NIM_VER" linux-x64
+          publish "$IMAGE:$NIM_VER-alpine" linux-x64-musl
+
       - name: Re-stitch multi-platform manifest lists
         run: |
           # A plain push flattens the shared tags to the linux manifest only.

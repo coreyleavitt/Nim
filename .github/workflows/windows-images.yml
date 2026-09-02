@@ -57,6 +57,25 @@ jobs:
           docker push "$env:IMAGE`:$env:NIM_VER-windows"
           docker push "$env:IMAGE`:$env:NIM_VER-mingw"
 
+      - uses: oras-project/setup-oras@v1
+
+      - name: Publish prefix zip artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cid = docker create "$env:IMAGE`:$env:NIM_VER-windows"
+          docker cp "$cid`:C:\nim\$env:NIM_VER-patched" "nim-$env:NIM_VER-patched"
+          docker rm $cid | Out-Null
+          Compress-Archive -Path "nim-$env:NIM_VER-patched" -DestinationPath "nim-$env:NIM_VER-patched-windows-x64.zip"
+          $patches = (Get-ChildItem "patches/$env:NIM_VER/*.patch" | ForEach-Object Name) -join ','
+          oras push "$env:IMAGE`:$env:NIM_VER-windows-x64" `
+            --artifact-type application/x-nim-toolchain `
+            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" `
+            --annotation "dev.leavitt.nim.version=$env:NIM_VER" `
+            --annotation "dev.leavitt.nim.patches=$patches" `
+            "nim-$env:NIM_VER-patched-windows-x64.zip:application/zip"
+          if ($LASTEXITCODE -ne 0) { throw "oras push failed" }
+
       - name: Re-stitch multi-platform manifest lists
         shell: bash
         run: |

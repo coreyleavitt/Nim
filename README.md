@@ -27,6 +27,17 @@ Windows port's `patches/`. Re-sync after changing the series.
   the build context (`cache/`) because the Dockerfiles no longer download
   it in-build.
 
+Every platform also publishes the bare toolchain prefix as an OCI artifact
+next to the container tags — the fast path for CI (a few dozen MB instead of
+a container pull; only needs a C compiler on the consumer):
+
+| tag | contents |
+|---|---|
+| `2.2.10-linux-x64` | glibc prefix, tar.xz (same bits as the `2.2.10` image) |
+| `2.2.10-linux-x64-musl` | musl prefix, tar.xz (same bits as `-alpine`) |
+| `2.2.10-windows-x64` | MSVC prefix, zip (same bits as `-windows`) |
+| `2.2.10-macos-arm64` | arm64 prefix, tar.xz (no container equivalent) |
+
 Consume:
 
 ```
