@@ -15,9 +15,9 @@ Windows port's `patches/`. Re-sync after changing the series.
   (identical to the container recipe, plus a shasum shim for macOS).
 - `tests/` — repro programs for the bugs the series fixes; the workflow runs
   them against the built compiler.
-- `.github/workflows/macos-toolchain.yml` — workflow_dispatch build that
-  publishes `ghcr.io/coreyleavitt/nim:<ver>-macos-<arch>` as an OCI artifact
-  (a tar.xz of the prefix, pushed with oras).
+- `.github/workflows/native-artifacts.yml` — builds the prefix directly on
+  native runners (macos-arm64, linux-arm64) and publishes it as an OCI
+  artifact via oras; triggered by pushes to this branch.
 - `.github/workflows/linux-images.yml` — dispatch-only for now: builds the
   glibc + alpine dev-base images from the committed series, validates,
   pushes, and re-stitches the shared manifest lists.
@@ -36,6 +36,7 @@ a container pull; only needs a C compiler on the consumer):
 | `2.2.10-linux-x64` | glibc prefix, tar.xz (same bits as the `2.2.10` image) |
 | `2.2.10-linux-x64-musl` | musl prefix, tar.xz (same bits as `-alpine`) |
 | `2.2.10-windows-x64` | MSVC prefix, zip (same bits as `-windows`) |
+| `2.2.10-linux-arm64` | glibc arm64 prefix, tar.xz (runner-built, no container equivalent) |
 | `2.2.10-macos-arm64` | arm64 prefix, tar.xz (no container equivalent) |
 
 Consume:
