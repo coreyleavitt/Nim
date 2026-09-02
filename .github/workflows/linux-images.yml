@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
   push:
     branches: [toolchain]
-    paths: ['.github/workflows/linux-images.yml']
+    paths: ['.github/workflows/linux-images.yml', 'patches/**', 'build-nim.sh', 'Dockerfile.dev', 'Dockerfile.alpine', 'tests/**']
 
 permissions:
   contents: read

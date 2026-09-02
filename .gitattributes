@@ -1,0 +1,3 @@
+# Build inputs must stay byte-exact on every platform: git apply enforces
+# exact hunks, and CRLF-converted patch files stop matching the LF sources.
+* -text

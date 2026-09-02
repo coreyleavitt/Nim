@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
   push:
     branches: [toolchain]
-    paths: ['.github/workflows/windows-images.yml']
+    paths: ['.github/workflows/windows-images.yml', 'patches/**', 'build-nim.ps1', 'Dockerfile.windows-msvc', 'Dockerfile.windows-mingw', 'tests/**', '.gitattributes']
 
 permissions:
   contents: read

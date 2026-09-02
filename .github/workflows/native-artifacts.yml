@@ -17,6 +17,7 @@ on:
   workflow_dispatch:
   push:
     branches: [toolchain]
+    paths: ['.github/workflows/native-artifacts.yml', 'patches/**', 'build-nim.sh', 'tests/**', '.gitattributes']
 
 permissions:
   contents: read
