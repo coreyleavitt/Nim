@@ -26,6 +26,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Reclaim runner disk for container layers
+        shell: pwsh
+        run: |
+          # The MSVC image needs ~25GB of C: for servercore layers plus the
+          # VS Build Tools install; the hosted runner ships with most of C:
+          # consumed by preinstalled toolchains we do not use.
+          Get-PSDrive C | Format-Table -AutoSize
+          foreach ($dir in @('C:\Android', 'C:\hostedtoolcache\windows\CodeQL', 'C:\Program Files\dotnet\sdk', 'C:\Modules', 'C:\tools\ghc*', 'C:\selenium')) {
+            if (Test-Path $dir) { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+          }
+          Get-PSDrive C | Format-Table -AutoSize
+
       - name: Seed release tarball cache
         shell: pwsh
         run: |
