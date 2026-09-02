@@ -10,6 +10,9 @@ name: linux-images
 
 on:
   workflow_dispatch:
+  push:
+    branches: [toolchain]
+    paths: ['.github/workflows/linux-images.yml']
 
 permissions:
   contents: read

@@ -8,6 +8,9 @@ name: windows-images
 
 on:
   workflow_dispatch:
+  push:
+    branches: [toolchain]
+    paths: ['.github/workflows/windows-images.yml']
 
 permissions:
   contents: read
