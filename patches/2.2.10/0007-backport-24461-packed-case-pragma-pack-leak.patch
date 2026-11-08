@@ -1,0 +1,57 @@
+Backport of nim-lang/Nim#24461 (upstream commit b7b1003e6a, devel 2024-11-21)
+onto the 2.2.10 source tree.
+
+For C compilers without __attribute__ (vcc), a {.packed.} object is wrapped
+in `#pragma pack(push, 1)` / `#pragma pack(pop)`, and so is every branch
+struct of a packed case object. The `addFieldWithStructType` template added
+the branch's pop to `result`, the builder of the *calling* proc, instead of
+`obj`, the union body it was building. In genRecordFieldsAux that `result`
+is the enclosing record's field list, which is emitted before the union, so
+the pops come out ahead of the pushes they are meant to close:
+
+    #pragma pack(push, 1)
+    struct PackedCase { tag; k;
+    #pragma pack(pop)
+    #pragma pack(pop)
+    union { #pragma pack(push, 1) struct {...} _k_1;
+            #pragma pack(push, 1) struct {...} _k_2; };
+    };
+    #pragma pack(pop)
+
+Push and pop counts balance, but MSVC's pack stack is left one level deep,
+so every struct emitted after a packed case object in that module is laid
+out with pack(1) while other modules, and the compiler's own sizeof/offset
+tables, use the natural layout. Found as sizeof(VariantArm) differing
+between two translation units (65 vs 72 bytes) in nelli's MSVC CI. The
+gcc/clang path uses __attribute__((__packed__)) per struct and is unaffected.
+
+Regression from #24145 (the cbuilder introduction, which 2.2.x carries);
+upstream fixed it in devel but never backported to version-2-2. The same
+`result`/`obj` slip in `addStruct` is fixed here too: it is harmless today
+only because every caller passes its own `result` as `obj`. Devel's
+`finishStruct` writes to `obj`, so after this patch both templates match
+devel. Drop this patch once a 2.2.x containing #24461 ships.
+
+Repro: tests/packed_case_vcc.nim, checked by tests/check_packed_case_vcc.nim
+(`--compileOnly --cc:vcc`, no MSVC needed).
+
+--- a/compiler/cbuilder.nim
++++ b/compiler/cbuilder.nim
+@@ -96,7 +96,7 @@
+     obj.addField(name = "dummy", typ = "char")
+   obj.add("};\n")
+   if tfPacked in typ.flags and hasAttribute notin CC[m.config.cCompiler].props:
+-    result.add("#pragma pack(pop)\n")
++    obj.add("#pragma pack(pop)\n")
+ 
+ template addFieldWithStructType(obj: var Builder; m: BModule; parentTyp: PType; fieldName: string, body: typed) =
+   ## adds a field with a `struct { ... }` type, building it according to `body`
+@@ -113,7 +113,7 @@
+   obj.add(fieldName)
+   obj.add(";\n")
+   if tfPacked in parentTyp.flags and hasAttribute notin CC[m.config.cCompiler].props:
+-    result.add("#pragma pack(pop)\n")
++    obj.add("#pragma pack(pop)\n")
+ 
+ template addAnonUnion(obj: var Builder; body: typed) =
+   obj.add "union{\n"

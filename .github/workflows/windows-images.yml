@@ -61,6 +61,10 @@ jobs:
               nim c -r --hints:off --mm:orc --threads:on -d:release --nimcache:C:\temp\nc -o:C:\temp\t2.exe C:\t\repro_ref_handoff.nim
               if (`$LASTEXITCODE -ne 0) { exit 1 }
               nim c -r --hints:off --mm:orc -d:useMalloc --nimcache:C:\temp\nc -o:C:\temp\t3.exe C:\t\repro_26025.nim
+              if (`$LASTEXITCODE -ne 0) { exit 1 }
+              nim c -r --hints:off --nimcache:C:\temp\nc -o:C:\temp\t4.exe C:\t\packed_case_vcc.nim
+              if (`$LASTEXITCODE -ne 0) { exit 1 }
+              nim r --hints:off --nimcache:C:\temp\nc_check C:\t\check_packed_case_vcc.nim
               if (`$LASTEXITCODE -ne 0) { exit 1 }"
             if ($LASTEXITCODE -ne 0) { throw "validation failed for $suffix" }
           }

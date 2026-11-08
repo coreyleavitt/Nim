@@ -14,7 +14,9 @@ Windows port's `patches/`. Re-sync after changing the series.
 - `build-nim.sh` — pinned from-source build into a self-contained prefix
   (identical to the container recipe, plus a shasum shim for macOS).
 - `tests/` — repro programs for the bugs the series fixes; the workflow runs
-  them against the built compiler.
+  them against the built compiler. `check_*.nim` entries inspect the emitted
+  C instead of running a program, so a `--cc:vcc` codegen fix is verified on
+  hosts without MSVC.
 - `.github/workflows/native-artifacts.yml` — builds the prefix directly on
   native runners (macos-arm64, linux-arm64) and publishes it as an OCI
   artifact via oras; triggered by pushes to this branch.
