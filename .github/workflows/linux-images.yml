@@ -58,7 +58,7 @@ jobs:
 
       - name: Publish prefix tarball artifacts
         run: |
-          # Same bits as the images: extract the validated prefix, package,
+          # Same bits as the alpine image: extract the validated prefix, package,
           # push as an OCI artifact. Fast path for CI consumers that do not
           # want a container pull.
           set -euo pipefail
@@ -78,7 +78,10 @@ jobs:
               "nim-$NIM_VER-patched-$suffix.tar.xz:application/x-xz"
             rm -f "nim-$NIM_VER-patched-$suffix.tar.xz"
           }
-          publish "$IMAGE:$NIM_VER" linux-x64
+          # linux-x64 (glibc) is NOT published from here: Dockerfile.dev is
+          # openSUSE Tumbleweed (rolling), whose glibc outruns consumer
+          # runners. It is built on ubuntu-22.04 with a glibc-floor guard in
+          # native-artifacts.yml instead. musl has no glibc floor.
           publish "$IMAGE:$NIM_VER-alpine" linux-x64-musl
 
       - name: Re-stitch multi-platform manifest lists

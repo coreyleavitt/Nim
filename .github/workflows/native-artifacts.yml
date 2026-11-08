@@ -4,20 +4,24 @@ name: native-artifacts
 # container) for platforms consumed as OCI artifacts rather than images:
 #   ghcr.io/coreyleavitt/nim:<ver>-macos-arm64
 #   ghcr.io/coreyleavitt/nim:<ver>-linux-arm64
+#   ghcr.io/coreyleavitt/nim:<ver>-linux-x64
 # Same recipe as the container images: release tarball + the committed
 # backport series via build-nim.sh, validated against the repro suite.
 # Consume with `oras pull` + extract; the prefix resolves its stdlib
 # relative to bin/nim.
 #
-# Portability note: the linux-arm64 artifact links the runner's glibc
-# (ubuntu-24.04-arm, glibc 2.39); older hosts need a musl variant, which can
-# be added by running the same build inside an alpine arm64 container here.
+# Portability: the glibc artifacts (linux-x64, linux-arm64) are built on
+# ubuntu-22.04 runners (glibc 2.35), never on a rolling distro, and
+# scripts/check-glibc-floor.sh fails the job before any push if an ELF in the
+# prefix needs a glibc symbol version above GLIBC_FLOOR. Raise the floor only
+# together with the runner image. Hosts older than the floor need the
+# linux-x64-musl artifact (published by linux-images.yml from alpine).
 
 on:
   workflow_dispatch:
   push:
     branches: [toolchain]
-    paths: ['.github/workflows/native-artifacts.yml', 'patches/**', 'build-nim.sh', 'tests/**', '.gitattributes']
+    paths: ['.github/workflows/native-artifacts.yml', 'patches/**', 'build-nim.sh', 'tests/**', 'scripts/**', '.gitattributes']
 
 permissions:
   contents: read
@@ -26,6 +30,9 @@ permissions:
 env:
   NIM_VER: "2.2.10"
   NIM_SHA: "7957b7ed004206bcf10bcc4f3b4744153878e62f2431552a9a8e9d3f40e8d5d5"
+  # Highest glibc symbol version the linux artifacts may require. This is
+  # ubuntu-22.04's glibc; the single place the floor is declared.
+  GLIBC_FLOOR: "2.35"
 
 jobs:
   build:
@@ -35,7 +42,9 @@ jobs:
         include:
           - runner: macos-14
             suffix: macos-arm64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-22.04
+            suffix: linux-x64
+          - runner: ubuntu-22.04-arm
             suffix: linux-arm64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -48,6 +57,10 @@ jobs:
           NIM_PATCH_DIR="$PWD/patches/$NIM_VER" \
           NIM_KOCH_TOOLS=1 \
             ./build-nim.sh "$NIM_VER" "$NIM_SHA" "$PWD/prefix/nim-$NIM_VER-patched"
+
+      - name: Guard the glibc floor (before any push)
+        if: runner.os == 'Linux'
+        run: scripts/check-glibc-floor.sh "$PWD/prefix/nim-$NIM_VER-patched"
 
       - name: Validate against the series' repro suite
         run: |
