@@ -74,6 +74,7 @@ jobs:
           nim r --hints:off --nimcache:"$RUNNER_TEMP/nc_check" tests/check_packed_case_vcc.nim
           nim c -r --hints:off --mm:orc -o:"$RUNNER_TEMP/t5" tests/method_dispatch_table.nim | grep -q ok
           nim cpp -r --hints:off -o:"$RUNNER_TEMP/t6" tests/method_dispatch_table.nim | grep -q ok
+          sh tests/method_dispatch_table_lib/run.sh | grep -q ok
 
       - name: Package prefix
         run: |

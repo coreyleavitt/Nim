@@ -7,7 +7,7 @@ only has to be imported somewhere), and two modules may declare the same
 signature, in which case the dispatcher silently keeps one. No macro or
 compile-time view of a method can list the overrides that really run.
 
-This patch makes the compiler say so. The main module's C gains
+This patch makes the compiler say so. The main module's C gains, for an executable,
 
     void* nimMethodDispatchTable(NI* count);
 
@@ -28,15 +28,24 @@ constant function: nothing runs unless the program calls it. It is written for
 the main module on the c and cpp backends (NIM_EXTERNC N_CDECL); no
 platform-specific code is involved, so mingw and msvc take the same path.
 
+It is written for executables only, never under --app:lib or --app:staticlib:
+an exported symbol in every library would collide as soon as two Nim libraries
+(or a Nim library and a Nim executable) were linked into one program. The
+accessor also has hidden visibility (N_LIB_PRIVATE), since only code in the
+same binary calls it. A library build therefore has no table, and a consumer
+that imports the symbol must guard on the application type as well as on
+`defined(nimHasMethodDispatchTable)`.
+
 Consumer: nelli's re-executed replay child (RFC-0016 PRC-02b) reads the table
 to confirm that every method body a dispatcher can run was one its footprint
 scan read.
 
-Repro: tests/method_dispatch_table.nim.
+Repro: tests/method_dispatch_table.nim (the executable has the table) and
+tests/method_dispatch_table_lib/run.sh (two static libraries link together).
 
 --- a/compiler/cgen.nim
 +++ b/compiler/cgen.nim
-@@ -2356,6 +2356,47 @@
+@@ -2356,6 +2356,51 @@
    let mm = m
    m.g.modulesClosed.add mm
  
@@ -55,9 +64,13 @@ Repro: tests/method_dispatch_table.nim.
 +  ## are in the dispatcher's if-chain order, so the first row of a bucket whose
 +  ## receiver the dynamic type inherits from is the body that runs. `count` is
 +  ## -1 when dispatch is not an if-chain (`--experimental:vtables`).
-+  ## The rows are static const data. Main module only.
++  ## The rows are static const data. Main module of an executable only: a
++  ## static or dynamic library would export a symbol every other Nim binary
++  ## linking it also defines, and the accessor is called only by code in the
++  ## same binary, so it has hidden visibility.
 +  if sfMainModule notin m.module.flags: return
 +  let conf = m.config
++  if {optGenDynLib, optGenStaticLib} * conf.globalOptions != {}: return
 +  let chain = optMultiMethods in conf.globalOptions or
 +      conf.selectedGC notin {gcArc, gcAtomicArc, gcOrc} or
 +      vtables notin conf.features
@@ -77,23 +90,13 @@ Repro: tests/method_dispatch_table.nim.
 +  m.s[cfsProcs].add "\nstatic NIM_CONST struct { void* bucket; void* fn; " &
 +    "char const* recv; } nimMethodDispatchRows[] = {\n" & rows &
 +    "\t{0, 0, 0}\n};\n" &
-+    "NIM_EXTERNC N_CDECL(void*, nimMethodDispatchTable)(NI* count) {\n" &
++    "NIM_EXTERNC N_LIB_PRIVATE N_CDECL(void*, nimMethodDispatchTable)(NI* count) {\n" &
 +    "\t*count = " & $(if chain: count else: -1) & ";\n" &
 +    "\treturn (void*)nimMethodDispatchRows;\n}\n"
 +
  proc genForwardedProcs(g: BModuleList) =
    # Forward declared proc:s lack bodies when first encountered, so they're given
    # a second pass here
---- a/compiler/pipelines.nim
-+++ b/compiler/pipelines.nim
-@@ -194,6 +194,7 @@
-             createTypeBoundOps(graph, ctx, retTyp, disp.ast.info, idgen)
-           genProcAux(m, disp)
-         discard closePContext(graph, ctx, nil)
-+      genMethodDispatchTable(graph, m)
-   of JSgenPass:
-     when not defined(leanCompiler):
-       discard finalJSCodeGen(graph, bModule, finalNode)
 --- a/compiler/condsyms.nim
 +++ b/compiler/condsyms.nim
 @@ -140,6 +140,7 @@
@@ -104,3 +107,13 @@ Repro: tests/method_dispatch_table.nim.
    defineSymbol("nimHasTemplateRedefinitionPragma")
    defineSymbol("nimHasCstringCase")
    defineSymbol("nimHasCallsitePragma")
+--- a/compiler/pipelines.nim
++++ b/compiler/pipelines.nim
+@@ -194,6 +194,7 @@
+             createTypeBoundOps(graph, ctx, retTyp, disp.ast.info, idgen)
+           genProcAux(m, disp)
+         discard closePContext(graph, ctx, nil)
++      genMethodDispatchTable(graph, m)
+   of JSgenPass:
+     when not defined(leanCompiler):
+       discard finalJSCodeGen(graph, bModule, finalNode)

@@ -46,7 +46,8 @@ jobs:
               nim c -r --hints:off -o:/tmp/t4 /t/packed_case_vcc.nim | grep -q ok
               nim r --hints:off --nimcache:/tmp/nc_check /t/check_packed_case_vcc.nim
               nim c -r --hints:off --mm:orc -o:/tmp/t5 /t/method_dispatch_table.nim | grep -q ok
-              nim cpp -r --hints:off -o:/tmp/t6 /t/method_dispatch_table.nim | grep -q ok'
+              nim cpp -r --hints:off -o:/tmp/t6 /t/method_dispatch_table.nim | grep -q ok
+              sh /t/method_dispatch_table_lib/run.sh | grep -q ok'
           done
 
       - name: Push
