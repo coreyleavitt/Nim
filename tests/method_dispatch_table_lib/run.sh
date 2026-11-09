@@ -6,6 +6,12 @@ set -e
 here=$(cd "$(dirname "$0")" && pwd)
 d=$(mktemp -d)
 trap 'rm -rf "$d"' EXIT
+# Nim's clang profile archives with llvm-ar, which an image may lack (alpine
+# ships binutils' ar only); the formats are the same, so stand ar in for it.
+if ! command -v llvm-ar >/dev/null 2>&1 && command -v ar >/dev/null 2>&1; then
+  mkdir "$d/bin" && ln -s "$(command -v ar)" "$d/bin/llvm-ar"
+  PATH="$d/bin:$PATH"
+fi
 nim c --hints:off --app:staticlib --noMain --nimMainPrefix:A --nimcache:"$d/ca" -o:"$d/liba.a" "$here/liba.nim"
 nim c --hints:off --app:staticlib --noMain --nimMainPrefix:B --nimcache:"$d/cb" -o:"$d/libb.a" "$here/libb.nim"
 if nm "$d/liba.a" "$d/libb.a" | grep -q ' [TtDdRr] .*nimMethodDispatchTable'; then
