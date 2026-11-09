@@ -1,0 +1,106 @@
+Per-binary method dispatch table (new; not an upstream backport).
+
+Nim builds a method's dispatcher as an if-chain in the main module's C, after
+every module is semmed. Which body a dynamic call runs is therefore decided by
+the whole program: an override may sit in a module the caller cannot see (it
+only has to be imported somewhere), and two modules may declare the same
+signature, in which case the dispatcher silently keeps one. No macro or
+compile-time view of a method can list the overrides that really run.
+
+This patch makes the compiler say so. The main module's C gains
+
+    void* nimMethodDispatchTable(NI* count);
+
+which stores the row count in *count and returns a static const array of
+    { void* bucket; void* fn; char const* recv; }
+one row per branch of every dispatcher, in the dispatcher's if-chain order
+(most specific receiver first): `bucket` is the address of the bucket's
+dispatcher, `fn` the address of the method body that branch calls, `recv` the
+name of the branch's receiver object type. The first row of a bucket whose
+receiver the dynamic type inherits from is the body that runs. *count is -1
+when dispatch is not an if-chain (`--experimental:vtables` under arc/orc), in
+which case there are no rows.
+
+`defined(nimHasMethodDispatchTable)` announces the accessor, as the other
+`nimHas...` symbols announce theirs, so code written against it still compiles
+with a stock compiler. The rows are static const data and the accessor a
+constant function: nothing runs unless the program calls it. It is written for
+the main module on the c and cpp backends (NIM_EXTERNC N_CDECL); no
+platform-specific code is involved, so mingw and msvc take the same path.
+
+Consumer: nelli's re-executed replay child (RFC-0016 PRC-02b) reads the table
+to confirm that every method body a dispatcher can run was one its footprint
+scan read.
+
+Repro: tests/method_dispatch_table.nim.
+
+--- a/compiler/cgen.nim
++++ b/compiler/cgen.nim
+@@ -2356,6 +2356,47 @@
+   let mm = m
+   m.g.modulesClosed.add mm
+ 
++proc genMethodDispatchTable*(graph: ModuleGraph; m: BModule) =
++  ## A per-binary table of what each method dispatcher can run, and an
++  ## accessor for it, so a program (a re-executed replay child) can ask which
++  ## body a dispatcher would choose instead of guessing the override set: an
++  ## override may sit in a module the asker cannot see, and two modules may
++  ## declare the same override (the dispatcher silently picks one).
++  ##
++  ##   void* nimMethodDispatchTable(NI* count)
++  ##
++  ## returns `count` rows of {bucket, fn, recv}: `bucket` is the address of the
++  ## bucket's dispatcher, `fn` the address of the method body one branch of it
++  ## calls, `recv` the NUL-terminated name of that branch's receiver type. Rows
++  ## are in the dispatcher's if-chain order, so the first row of a bucket whose
++  ## receiver the dynamic type inherits from is the body that runs. `count` is
++  ## -1 when dispatch is not an if-chain (`--experimental:vtables`).
++  ## The rows are static const data. Main module only.
++  if sfMainModule notin m.module.flags: return
++  let conf = m.config
++  let chain = optMultiMethods in conf.globalOptions or
++      conf.selectedGC notin {gcArc, gcAtomicArc, gcOrc} or
++      vtables notin conf.features
++  var rows = ""
++  var count = 0
++  if chain:
++    for bucket in 0..<graph.methods.len:
++      let disp = graph.methods[bucket].dispatcher
++      if disp.loc.snippet == "": continue
++      for meth in graph.methods[bucket].methods:
++        genProc(m, meth)
++        if meth.loc.snippet == "": continue
++        let recv = typeToString(meth.typ.firstParamType.skipTypes(skipPtrs))
++        rows.add "\t{(void*)&" & disp.loc.snippet & ", (void*)&" &
++                 meth.loc.snippet & ", " & $makeCString(recv) & "},\n"
++        inc count
++  m.s[cfsProcs].add "\nstatic NIM_CONST struct { void* bucket; void* fn; " &
++    "char const* recv; } nimMethodDispatchRows[] = {\n" & rows &
++    "\t{0, 0, 0}\n};\n" &
++    "NIM_EXTERNC N_CDECL(void*, nimMethodDispatchTable)(NI* count) {\n" &
++    "\t*count = " & $(if chain: count else: -1) & ";\n" &
++    "\treturn (void*)nimMethodDispatchRows;\n}\n"
++
+ proc genForwardedProcs(g: BModuleList) =
+   # Forward declared proc:s lack bodies when first encountered, so they're given
+   # a second pass here
+--- a/compiler/pipelines.nim
++++ b/compiler/pipelines.nim
+@@ -194,6 +194,7 @@
+             createTypeBoundOps(graph, ctx, retTyp, disp.ast.info, idgen)
+           genProcAux(m, disp)
+         discard closePContext(graph, ctx, nil)
++      genMethodDispatchTable(graph, m)
+   of JSgenPass:
+     when not defined(leanCompiler):
+       discard finalJSCodeGen(graph, bModule, finalNode)
+--- a/compiler/condsyms.nim
++++ b/compiler/condsyms.nim
+@@ -140,6 +140,7 @@
+ 
+   defineSymbol("nimHasEnforceNoRaises")
+   defineSymbol("nimHasTopDownInference")
++  defineSymbol("nimHasMethodDispatchTable")
+   defineSymbol("nimHasTemplateRedefinitionPragma")
+   defineSymbol("nimHasCstringCase")
+   defineSymbol("nimHasCallsitePragma")
