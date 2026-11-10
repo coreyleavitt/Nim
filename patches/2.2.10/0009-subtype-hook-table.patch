@@ -1,0 +1,205 @@
+Per-binary subtype-hook table (new; not an upstream backport). Companion to 0008.
+
+A `ref` of an object hierarchy may hold any subtype the program constructs,
+and a subtype may be declared in a module the code holding the `ref` cannot
+see (it only has to be imported, and constructed, somewhere). Overwriting or
+dropping such a `ref` runs that subtype's lifetime hooks, with no call in the
+source. No macro or compile-time view of a type can list its subtypes, so no
+analysis that reads source can list the hooks that may run.
+
+This patch makes the compiler say so. The main module's C gains, for an
+executable,
+
+    void* nimSubtypeHookTable(NI* count);
+
+which stores the row count in *count and returns a static const array of
+    { char const* base; char const* sub; void* hook; NI open; }
+For every inheriting object type `sub` whose RTTI the binary emits (every type
+an object header is written for, hence every type a `ref` of an ancestor can
+hold), and for every proper ancestor `base` of it, there is one row per user
+lifetime hook (`=destroy`, `=copy`, `=sink`, `=dup`, `=wasMoved`, `=trace`,
+`=deepCopy` written by the user, `sfOverridden`) a value of `sub` may run: its
+own, those of every type it holds, and those of every subtype a `ref` or `ptr`
+it holds may point to. `hook` is the address of that hook's C function (the
+same address Nim code takes of the hook), or NULL in a single row when `sub`
+reaches no user hook. `open` is 1 in a row (hook NULL) when `sub` holds a
+closure, whose environment's hooks cannot be listed. Names are `module.Type`,
+the declaring module's name and the type symbol's name (a `ref object`
+declares its object type as `T:ObjectType`). *count is -1 when the memory
+manager is not arc/atomicArc/orc, in which case there are no rows.
+
+`defined(nimHasSubtypeHookTable)` announces the accessor. As with 0008 the rows
+are static const data, the accessor is a constant function with hidden
+visibility (N_LIB_PRIVATE), it is written for the main module of an executable
+on the c and cpp backends only (never under --app:lib or --app:staticlib), and
+no platform-specific code is involved, so mingw and msvc take the same path.
+A consumer must guard on the application type as well as on the define.
+
+Consumer: nelli's global route scan (RFC-0016 PRC-02m) takes the hooks of the
+subtypes it reads as those a `ref` of the hierarchy may run, and asks the table
+at run time whether any subtype in the binary has another.
+
+Repro: tests/subtype_hook_table/main.nim (a subtype and its hook declared in a
+module the main file never imports) and tests/method_dispatch_table_lib/run.sh
+(two static libraries define neither accessor).
+
+--- a/compiler/ccgtypes.nim
++++ b/compiler/ccgtypes.nim
+@@ -1796,6 +1796,12 @@
+     return prefixTI.rope & result & ")".rope
+ 
+   m.g.typeInfoMarkerV2[sig] = (str: result, owner: owner)
++  block:
++    # the subtype-hook table (genSubtypeHookTable): an inheriting object whose
++    # header this binary can write, so a `ref` of an ancestor may hold one
++    let o = t.skipTypes(abstractInst)
++    if o.kind == tyObject and o.baseClass != nil:
++      m.g.rttiSubtypes.add o
+   if m.compileToCpp or m.hcrOn:
+     genTypeInfoV2OldImpl(m, t, origType, result, info)
+   else:
+--- a/compiler/cgendata.nim
++++ b/compiler/cgendata.nim
+@@ -123,6 +123,7 @@
+     generatedHeader*: BModule
+     typeInfoMarker*: TypeCacheWithOwner
+     typeInfoMarkerV2*: TypeCacheWithOwner
++    rttiSubtypes*: seq[PType] # object types with a base whose RTTI v2 is emitted
+     config*: ConfigRef
+     graph*: ModuleGraph
+     strVersion*, seqVersion*: int # version of the string/seq implementation to use
+--- a/compiler/cgen.nim
++++ b/compiler/cgen.nim
+@@ -2401,6 +2401,112 @@
+     "\t*count = " & $(if chain: count else: -1) & ";\n" &
+     "\treturn (void*)nimMethodDispatchRows;\n}\n"
+ 
++proc genSubtypeHookTable*(graph: ModuleGraph; m: BModule) =
++  ## A per-binary table of the user lifetime hooks a value of each subtype may
++  ## run, so a program (nelli's replay) can ask what a `ref` of an object
++  ## hierarchy may hold instead of guessing: a subtype may be declared in a
++  ## module the asker cannot see, and need only be constructed somewhere.
++  ##
++  ##   void* nimSubtypeHookTable(NI* count)
++  ##
++  ## returns `count` rows of {base, sub, hook, open}. A row names a proper
++  ## ancestor `base` of an inheriting object type `sub` whose RTTI this binary
++  ## emits (every type a header is written for, so every type a `ref` of
++  ## `base` may hold), and one user-written lifetime hook (`=destroy`, `=copy`,
++  ## `=sink`, `=dup`, `=wasMoved`, `=trace`, `=deepCopy`) a value of `sub` may
++  ## run: its own, those of every type it holds, and those of every subtype a
++  ## `ref` or `ptr` it holds may point to. `hook` is NULL when `sub` reaches
++  ## none (the row records the subtype only). `open` is 1 when `sub` holds a
++  ## closure, whose environment's hooks cannot be listed. Names are
++  ## `module.Type` (the declaring module's name and the type symbol's name; a
++  ## `ref object` declares the object type `T:ObjectType`). `count` is -1 when
++  ## the memory manager is not arc/orc (no lifetime hooks run on that path).
++  ## Main module of an executable only, hidden visibility, as
++  ## `nimMethodDispatchTable`.
++  if sfMainModule notin m.module.flags: return
++  let conf = m.config
++  if {optGenDynLib, optGenStaticLib} * conf.globalOptions != {}: return
++  let listed = conf.selectedGC in {gcArc, gcAtomicArc, gcOrc}
++  proc idKey(t: PType): string = $t.itemId.module & ":" & $t.itemId.item
++  proc qualName(t: PType): string =
++    if t.sym == nil: "" else: getModule(t.sym).name.s & "." & t.sym.name.s
++  proc inherits(s, a: PType): bool =
++    var b = s.baseClass
++    while b != nil:
++      let o = b.skipTypes(skipPtrs)
++      if o.itemId == a.itemId: return true
++      b = o.baseClass
++    false
++  var rows = ""
++  var count = 0
++  if listed:
++    var done = initHashSet[string]()
++    var i = 0
++    while i < m.g.rttiSubtypes.len:   # genProc below may emit more RTTI
++      let s = m.g.rttiSubtypes[i]
++      inc i
++      if s.idKey in done: continue
++      done.incl s.idKey
++      var hooks: seq[PSym] = @[]
++      var open = false
++      var seen = initHashSet[string]()
++      proc walk(t: PType) =
++        if t == nil or t.idKey in seen: return
++        seen.incl t.idKey
++        for op in TTypeAttachedOp:
++          let h = getAttachedOp(graph, t, op)
++          if h != nil and sfOverridden in h.flags and h notin hooks: hooks.add h
++        case t.kind
++        of tyGenericInst, tyAlias, tySink, tyOwned, tyDistinct, tyInferred,
++           tyVar, tyLent, tySequence, tyArray, tyOpenArray, tyVarargs,
++           tyUncheckedArray:
++          if t.len > 0: walk(t.skipModifier)
++        of tyObject:
++          if t.len > 0: walk(t.baseClass)
++          proc walkN(n: PNode) =
++            if n == nil: return
++            case n.kind
++            of nkSym: walk(n.sym.typ)
++            of nkRecList, nkRecCase, nkOfBranch, nkElse:
++              for c in n: walkN(c)
++            else: discard
++          walkN(t.n)
++        of tyTuple:
++          for k in t.kids: walk(k)
++        of tyRef, tyPtr:
++          if t.len > 0:
++            walk(t.elementType)
++            let o = t.elementType.skipTypes(abstractInst)
++            if o.kind == tyObject:
++              for s2 in m.g.rttiSubtypes:
++                if inherits(s2, o): walk(s2)
++        of tyProc:
++          if t.callConv == ccClosure: open = true
++        else: discard
++      walk(s)
++      var cells: seq[string] = @[]
++      if open:
++        cells.add "0, 1"
++      for h in hooks:
++        genProc(m, h)
++        if h.loc.snippet == "": cells.add "0, 1"
++        else: cells.add "(void*)&" & h.loc.snippet & ", 0"
++      if cells.len == 0: cells.add "0, 0"
++      let sub = makeCString(qualName(s))
++      var b = s.baseClass
++      while b != nil:
++        let a = b.skipTypes(skipPtrs)
++        for c in cells:
++          rows.add "\t{" & $makeCString(qualName(a)) & ", " & $sub & ", " & c & "},\n"
++          inc count
++        b = a.baseClass
++  m.s[cfsProcs].add "\nstatic NIM_CONST struct { char const* base; " &
++    "char const* sub; void* hook; NI open; } nimSubtypeHookRows[] = {\n" & rows &
++    "\t{0, 0, 0, 0}\n};\n" &
++    "NIM_EXTERNC N_LIB_PRIVATE N_CDECL(void*, nimSubtypeHookTable)(NI* count) {\n" &
++    "\t*count = " & $(if listed: count else: -1) & ";\n" &
++    "\treturn (void*)nimSubtypeHookRows;\n}\n"
++
+ proc genForwardedProcs(g: BModuleList) =
+   # Forward declared proc:s lack bodies when first encountered, so they're given
+   # a second pass here
+--- a/compiler/condsyms.nim
++++ b/compiler/condsyms.nim
+@@ -141,6 +141,7 @@
+   defineSymbol("nimHasEnforceNoRaises")
+   defineSymbol("nimHasTopDownInference")
+   defineSymbol("nimHasMethodDispatchTable")
++  defineSymbol("nimHasSubtypeHookTable")
+   defineSymbol("nimHasTemplateRedefinitionPragma")
+   defineSymbol("nimHasCstringCase")
+   defineSymbol("nimHasCallsitePragma")
+--- a/compiler/pipelines.nim
++++ b/compiler/pipelines.nim
+@@ -195,6 +195,7 @@
+           genProcAux(m, disp)
+         discard closePContext(graph, ctx, nil)
+       genMethodDispatchTable(graph, m)
++      genSubtypeHookTable(graph, m)
+   of JSgenPass:
+     when not defined(leanCompiler):
+       discard finalJSCodeGen(graph, bModule, finalNode)

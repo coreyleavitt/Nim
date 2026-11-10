@@ -14,8 +14,8 @@ if ! command -v llvm-ar >/dev/null 2>&1 && command -v ar >/dev/null 2>&1; then
 fi
 nim c --hints:off --app:staticlib --noMain --nimMainPrefix:A --nimcache:"$d/ca" -o:"$d/liba.a" "$here/liba.nim"
 nim c --hints:off --app:staticlib --noMain --nimMainPrefix:B --nimcache:"$d/cb" -o:"$d/libb.a" "$here/libb.nim"
-if nm "$d/liba.a" "$d/libb.a" | grep -q ' [TtDdRr] .*nimMethodDispatchTable'; then
-  echo "FAIL: a static library defines nimMethodDispatchTable"; exit 1
+if nm "$d/liba.a" "$d/libb.a" | grep -q ' [TtDdRr] .*\(nimMethodDispatchTable\|nimSubtypeHookTable\)'; then
+  echo "FAIL: a static library defines nimMethodDispatchTable or nimSubtypeHookTable"; exit 1
 fi
 ${CC:-cc} "$here/main.c" "$d/liba.a" "$d/libb.a" -o "$d/m" -lm
 "$d/m"

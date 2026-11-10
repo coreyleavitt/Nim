@@ -67,6 +67,8 @@ jobs:
               nim r --hints:off --nimcache:C:\temp\nc_check C:\t\check_packed_case_vcc.nim
               if (`$LASTEXITCODE -ne 0) { exit 1 }
               nim c -r --hints:off --mm:orc --nimcache:C:\temp\nc -o:C:\temp\t5.exe C:\t\method_dispatch_table.nim
+              if (`$LASTEXITCODE -ne 0) { exit 1 }
+              nim c -r --hints:off --mm:orc --nimcache:C:\temp\nc7 -o:C:\temp\t7.exe C:\t\subtype_hook_table\main.nim
               if (`$LASTEXITCODE -ne 0) { exit 1 }"
             if ($LASTEXITCODE -ne 0) { throw "validation failed for $suffix" }
           }
